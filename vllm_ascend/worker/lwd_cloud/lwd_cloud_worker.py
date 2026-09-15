@@ -27,6 +27,7 @@ from vllm.distributed import (
 )
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.distributed.lwd_comm.future import LwdCommFuture
 from vllm_ascend.distributed.lwd_comm.lwd_parallel_init import (
@@ -78,6 +79,9 @@ class LwdCloudWorker(NPUWorker):
 
     def init_device(self):
         super().init_device()
+        # Payload scramble: bind the two static factors once; the per-flight
+        # seed is derived by the comm layer from each request's own fields.
+        self._build_payload_scrambler()
         # channel-global DOWN seqno counter (worker layer, send-time alloc)
         self._lwd_down_next_seqno = 0
         # req_id -> posted UP recv futures (consumed by the runner's device-side inject)
@@ -124,6 +128,20 @@ class LwdCloudWorker(NPUWorker):
         if self._lwd_early_recv_endpoint:
             self._start_lwd_early_recv_thread()
         self._register_lwd_prompt_embeds_provider()
+
+    def _build_payload_scrambler(self) -> None:
+        """Initialize the process-wide scrambler from config (no-op if not LWD)."""
+        if not self.enable_lwd:
+            return
+        from vllm_ascend.distributed.lwd_comm.payload_scramble import (
+            get_payload_scrambler,
+        )
+
+        scramble_cfg = get_ascend_config().payload_scramble
+        get_payload_scrambler(
+            device_id=scramble_cfg.get("device_id"),
+            custom_factor=scramble_cfg.get("custom_factor"),
+        )
 
     def load_model(self):
         """加载后打实际切片:层数/首末层名/pp 切层参数,启动期即可裁决
