@@ -211,14 +211,13 @@ class LwdCloudWorker(NPUWorker):
         num_tokens = sum(len(t) for t in meta.token_ids)
         if num_tokens <= 0:
             return
-        # aux 帧(mrope positions)行数:仅带 mrope 的请求算,与边侧组帧同源同序
-        aux_rows = sum(
-            len(t) for t, hm in zip(meta.token_ids, meta.has_mrope) if hm
-        )
-
+        # mrope positions 已改走控制面(LwdRangeItem.mrope_positions 随
+        # meta 到达,wire_version>=2),UP recv 只挂 embeds 主帧,aux_rows
+        # 恒 0——若残留非零,预挂的 aux irecv 永远收不到数据,水位停摆。
+        # aux 帧机制保留在通道层供 deepstack 等扩展。
         if self._lwd_early_recv_endpoint:
             future = self.get_or_post_early_recv(
-                batch.seqno, num_tokens, aux_rows
+                batch.seqno, num_tokens, 0
             )
         else:
             # 非端点:不碰跨机通道;广播接收推迟到注入时刻现场发起,
@@ -229,9 +228,9 @@ class LwdCloudWorker(NPUWorker):
             # 每批 7 行 INFO 是纯噪音,降到 DEBUG(VLLM_LOGGING_LEVEL=DEBUG
             # 时仍能看到各 rank 进前向的时刻/离散)
             logger.debug(
-                "[Lwd][pre-recv] POST seqno=%d reqs=%d tokens=%d aux_rows=%d "
+                "[Lwd][pre-recv] POST seqno=%d reqs=%d tokens=%d "
                 "endpoint=False ts=%.3f",
-                batch.seqno, len(meta.req_ids), num_tokens, aux_rows,
+                batch.seqno, len(meta.req_ids), num_tokens,
                 time.monotonic(),
             )
             return
@@ -239,10 +238,10 @@ class LwdCloudWorker(NPUWorker):
         # 没释放;mem_free 逼近 0 = OOM 前兆。
         free_bytes, _total = torch.npu.mem_get_info()
         logger.info(
-            "[Lwd][pre-recv] POST seqno=%d reqs=%d tokens=%d aux_rows=%d "
+            "[Lwd][pre-recv] POST seqno=%d reqs=%d tokens=%d "
             "endpoint=True ts=%.3f mem_alloc=%.2fGiB mem_peak=%.2fGiB "
             "mem_free=%.2fGiB",
-            batch.seqno, len(meta.req_ids), num_tokens, aux_rows,
+            batch.seqno, len(meta.req_ids), num_tokens,
             time.monotonic(),
             torch.npu.memory_allocated() / 2 ** 30,
             torch.npu.max_memory_allocated() / 2 ** 30,
@@ -294,8 +293,9 @@ class LwdCloudWorker(NPUWorker):
         """UP recv 请求的唯一构造点(提示路径与消费点补挂共用同一形状)。
 
         HCCL P2P 要求两端 numel 严格相等:主帧 = hash 载荷公式(embeds + 可选
-        专家 ID 字节),aux 帧 = mrope rows*3(int64,[n,3])。尺寸公式只在本处
-        算一次,两侧路径不会各算一遍算歪。
+        专家 ID 字节)。aux 帧机制保留供 deepstack 等未来载荷(mrope
+        positions 自 wire_version 2 起改走控制面,调用方恒传 aux_rows=0)。
+        尺寸公式只在本处算一次,两侧路径不会各算一遍算歪。
         """
         return LwdCommRequest(
             channel=LwdChannelType.UP,
@@ -306,8 +306,8 @@ class LwdCloudWorker(NPUWorker):
                 getattr(self.model_config.hf_config, "num_experts_per_tok", 0),
             ),
             seqno=int(seqno),
-            # aux 帧(mrope positions [n,3] int64)与主帧同 seqno;
-            # 0 = 纯文本批,零 aux 流量
+            # aux 第二载荷与主帧同 seqno;mrope 退役后恒 0(零 aux 流量),
+            # 未来载荷(如 deepstack)显式传行数即可
             aux_num_elements=int(aux_rows) * 3,
         )
 
