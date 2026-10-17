@@ -31,23 +31,6 @@ _LWD_ENDPOINTS: tuple[int, int] | None = None  # (edge_global_rank, cloud_global
 _INITIALIZED = False
 
 
-def dump_tensor(tag: str, tensor: "torch.Tensor") -> None:
-    """调试:打印数据面张量摘要,供边云两端成对对比数值。
-
-    tag 形如 "[Lwd][DUMP][req=...][seqno=...] SEND/RECV ...";
-    fp32 统一精度,输出 shape/dtype/首尾各 10 个数/sum/mean。
-    """
-    import numpy as np
-
-    flat = tensor.detach().to("cpu", torch.float32).numpy().reshape(-1)
-    with np.printoptions(threshold=np.inf, linewidth=10000, precision=8):
-        logger.info(
-            "%s shape=%s dtype=%s head10=%s tail10=%s sum=%.6f mean=%.8f",
-            tag, tuple(tensor.shape), tensor.dtype,
-            flat[:10], flat[-10:], float(flat.sum()), float(flat.mean()),
-        )
-
-
 def init_lwd_duplex_channels() -> None:
     """Create the two duplex channels for the edge/cloud endpoint pair.
 
@@ -182,17 +165,3 @@ def destroy_lwd_duplex_channels() -> None:
     _LWD_CHANNEL_STREAMS.clear()
     _LWD_ENDPOINTS = None
     _INITIALIZED = False
-
-
-def dump_tensor(tag: str, tensor: "torch.Tensor") -> None:
-    """调试:张量摘要打印(head10/tail10/sum/mean/shape/dtype),
-    供边云两端成对对比数值。"""
-    import numpy as np
-
-    flat = tensor.detach().to("cpu", torch.float32).numpy().reshape(-1)
-    with np.printoptions(threshold=np.inf, linewidth=10000, precision=8):
-        logger.info(
-            "%s shape=%s dtype=%s head10=%s tail10=%s sum=%.6f mean=%.8f",
-            tag, tuple(tensor.shape), tensor.dtype,
-            flat[:10], flat[-10:], float(flat.sum()), float(flat.mean()),
-        )
