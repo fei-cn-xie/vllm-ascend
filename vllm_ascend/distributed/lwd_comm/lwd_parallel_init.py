@@ -45,8 +45,7 @@ def init_lwd_ascend_model_parallel(parallel_config) -> None:
         f"{data_parallel_size} * ({edge_count} + {cloud_count})")
     backend = torch.distributed.get_backend(get_world_group().device_group)
 
-    # MC2 组:按 pp 段划分——段 0 为边 rank,段 1 为该实例的云 rank,
-    # 与 vllm 侧 PP 分组([边0, 云0] 两段链 + 其余单例)的链路语义对齐。
+    # MC2 groups mirror the vLLM-side TP groups: one group per side.
     mc2_groups: list[list[int]] = []
     for dp_idx in range(data_parallel_size):
         base = dp_idx * world_per_dp

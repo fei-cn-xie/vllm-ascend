@@ -615,12 +615,7 @@ class NPUWorker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        # Lwd edge-cloud: the inter-stage handoff rides the lwd UP/DOWN
-        # channels (edge embeds are received via _lwd_up_post_recvs), not
-        # the native PP p2p — the pp_group irecv below would block forever
-        # waiting for an isend no LWD peer ever posts.
-        if (forward_pass and not get_pp_group().is_first_rank
-                and not self.enable_lwd):
+        if forward_pass and not get_pp_group().is_first_rank:
             # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
             # it will conflict with the all-gather operation in flashcomm1.
             if enable_sp():

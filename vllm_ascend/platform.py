@@ -428,17 +428,6 @@ class NPUPlatform(Platform):
 
     @classmethod
     def _validate_pd_pp_mtp_config(cls, vllm_config: VllmConfig) -> None:
-        # Lwd prefill_only 边云豁免:pp=2 是拓扑推导值(边+云布局),
-        # 非原生流水线,PD 分离的 P/D 节点语义不适用;边云各自持有
-        # 完整角色(边 embed/unembed,云全层+采样),MTP 在云侧 decode
-        # 相位合法。仅豁免 prefill_only 模式,其余 lwd 模式照常校验。
-        lwd_config = getattr(vllm_config, "lwd_config", None)
-        if (
-            lwd_config is not None
-            and getattr(lwd_config, "enabled", False)
-            and getattr(lwd_config, "mode", "") == "prefill_only"
-        ):
-            return
         speculative_config = getattr(vllm_config, "speculative_config", None)
         if not cls._is_mtp_speculative_config(speculative_config):
             return

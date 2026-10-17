@@ -17,7 +17,7 @@ import time
 
 import numpy as np
 import torch
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.v1.outputs import ModelRunnerOutput
@@ -257,10 +257,9 @@ class LwdCloudModelRunner(NPUModelRunner):
     def _preprocess(self, scheduler_output, num_input_tokens, intermediate_tensors=None):
         """在异步投机位置修正后刷新 decode 掩码，再准备模型输入。"""
         if (self.use_async_spec_decode and self.enable_prompt_embeds
-                and intermediate_tensors is None and self.pcp_size == 1):
+                and self.pcp_size == 1):
             self._lwd_refresh_decode_embedding_mask(scheduler_output)
-            if (get_pp_group().is_first_rank
-                    and not self.model_config.is_encoder_decoder
+            if (not self.model_config.is_encoder_decoder
                     and (not self.supports_mm_inputs or self.input_batch.req_prompt_embeds)):
                 return self._lwd_preprocess_prompt_embeds(scheduler_output, num_input_tokens)
             # Other model paths keep the parent's preprocessing, which may

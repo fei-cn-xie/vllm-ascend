@@ -130,8 +130,8 @@ class LwdEdgeWorker(NPUWorker):
         # ``init_lwd_duplex_channels`` creates the two HCCL process groups
         # (``dist.new_group``) and then warms them up with a two-sided P2P
         # exchange (world barrier plus the edge/cloud isend/irecv pair), so it
-        # needs the distributed environment -- world group and PP group --
-        # which ``NPUWorker._init_worker_distributed_environment`` only builds
+        # needs the distributed environment (the world group), which
+        # ``NPUWorker._init_worker_distributed_environment`` only builds
         # inside ``init_device``.  The executor constructs the worker first and
         # calls ``init_device`` afterwards, so running it from ``__init__``
         # would trip the "group is not initialized" assertions; the two-sided

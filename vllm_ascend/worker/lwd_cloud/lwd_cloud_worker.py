@@ -151,29 +151,6 @@ class LwdCloudWorker(NPUWorker):
             custom_factor=scramble_cfg.get("custom_factor"),
         )
 
-    def load_model(self):
-        """加载后打实际切片:层数/首末层名/pp 切层参数,启动期即可裁决
-        半模型嫌疑(全量且从 layer 0 起 = 正常;减半/起始非 0 = pp 切错)。"""
-        super().load_model()
-        model = self.model_runner.get_model()
-        backbone = getattr(model, "model", model)
-        layers = getattr(backbone, "layers", None) or getattr(
-            backbone, "decoder_layers", None
-        )
-        pc = self.vllm_config.parallel_config
-        layer_names = [
-            n for n, _ in model.named_modules()
-            if n.count("layers.") == 1 and n.endswith(tuple("0123456789"))
-        ]
-        logger.info(
-            "[Lwd][cloud-model] loaded layers=%s first=%s last=%s "
-            "(config pp=%d tp=%d, my rank=%d) — 全量应覆盖 layer 0 起的全部层",
-            len(layers) if layers is not None else "?",
-            layer_names[0] if layer_names else "?",
-            layer_names[-1] if layer_names else "?",
-            pc.pipeline_parallel_size, pc.tensor_parallel_size, self.rank,
-        )
-
     # ------------------------------------------------------------------ #
     # Engine step wiring                                                  #
     # ------------------------------------------------------------------ #
