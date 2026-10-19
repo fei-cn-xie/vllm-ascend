@@ -425,8 +425,11 @@ class LwdCloudModelRunner(LwdBaseModelRunner):
                        **model_kwargs) -> "torch.Tensor":
         """Shard embeddings per the SP layout and publish the full Hash routing data into the forward context."""
         context = get_forward_context()
+        # flash_comm_v1_enabled is only set by the SP fast path; without SP
+        # (the LWD 1+8 TP layout) it is absent and the sharding is skipped.
         if (inputs_embeds is not None and intermediate_tensors is None
-                and context.flash_comm_v1_enabled and not self.supports_mm_inputs):
+                and getattr(context, "flash_comm_v1_enabled", False)
+                and not self.supports_mm_inputs):
             # Passing embeddings directly bypasses the native embedding layer; re-apply the sequence split here.
             tp_group = get_tp_group()
             if tp_group.world_size > 1:

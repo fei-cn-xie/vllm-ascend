@@ -24,7 +24,11 @@ class LwdMTPProposer(AscendEagleProposer):
     ) -> torch.Tensor:
         """Shard external embeddings in the active draft context before forward."""
         context = get_forward_context()
-        if inputs_embeds is not None and context.flash_comm_v1_enabled and not self.is_multimodal_model:
+        # flash_comm_v1_enabled is only set by the SP fast path; without SP
+        # (the LWD 1+8 TP layout) it is absent and the sharding is skipped.
+        if (inputs_embeds is not None
+                and getattr(context, "flash_comm_v1_enabled", False)
+                and not self.is_multimodal_model):
             tp_group = get_tp_group()
             if tp_group.world_size > 1:
                 if inputs_embeds.shape[0] != num_input_tokens:
