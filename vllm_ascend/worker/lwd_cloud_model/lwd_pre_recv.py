@@ -63,6 +63,8 @@ from vllm.lwd_logger import lwd_logger
 from vllm_ascend.distributed.lwd_data_plane.lwd_types import LwdChannelType
 
 if TYPE_CHECKING:
+    import torch.distributed as dist
+
     from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 
 # The logger name must sit inside the **vllm.** namespace: vLLM attaches
@@ -166,8 +168,46 @@ def attach_hint_mq() -> "MessageQueue | None":
 
 
 def create_report_mq() -> "MessageQueue":
-    """Worker side: create the done MQ (writer); the handle returns to the engine with the READY handshake."""
+    """Worker side: create the done MQ (writer)."""
     return _new_sideband_mq()
+
+
+# The done-MQ handle travels worker -> engine through the shared wire TCP
+# store (the same rendezvous the deployment already depends on), so the
+# vllm executor stays free of LWD plumbing: the worker publishes after
+# creating the MQ, the engine acquires once the workers are ready.
+LWD_IRECV_DONE_MQ_STORE_KEY = "lwd:irecv_done_mq"
+
+
+def _wire_store_client(init_method: str) -> "dist.TCPStore":
+    from urllib.parse import urlsplit
+
+    import torch.distributed as dist
+
+    url = urlsplit(init_method)
+    return dist.TCPStore(url.hostname, url.port, is_master=False)
+
+
+def publish_done_mq_handle(mq: "MessageQueue", init_method: str) -> None:
+    """Worker side: publish the done-MQ handle to the wire store."""
+    payload = base64.b64encode(pickle.dumps(mq.export_handle())).decode("ascii")
+    _wire_store_client(init_method).set(LWD_IRECV_DONE_MQ_STORE_KEY, payload)
+
+
+def acquire_done_mq(init_method: str) -> "MessageQueue | None":
+    """Engine side: rebuild the done-MQ reader from the wire store.
+
+    Call after the workers are ready (they publish during init_device).
+    Returns None when the key is absent (non-LWD or not yet published).
+    """
+    from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
+
+    try:
+        payload = _wire_store_client(init_method).get(LWD_IRECV_DONE_MQ_STORE_KEY)
+    except Exception:
+        # store down or key absent: keep the gate closed, engine logs NONE
+        return None
+    return MessageQueue.create_from_handle(pickle.loads(base64.b64decode(payload)), 0)
 
 
 # ---------------------------------------------------------------------- #
