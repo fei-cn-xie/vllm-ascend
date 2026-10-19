@@ -205,14 +205,19 @@ def acquire_done_mq(init_method: str) -> "MessageQueue | None":
     """Engine side: rebuild the done-MQ reader from the wire store.
 
     Call after the workers are ready (they publish during init_device).
-    Returns None when the key is absent (non-LWD or not yet published).
+    Returns None when the key is absent (non-LWD or not yet published);
+    the failure reason is logged so a stuck gate is diagnosable.
     """
     from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 
     try:
         payload = _wire_store_client(init_method).get(LWD_IRECV_DONE_MQ_STORE_KEY)
-    except Exception:
-        # store down or key absent: keep the gate closed, engine logs NONE
+    except Exception as exc:
+        lwd_logger.warning(
+            "[pre-recv] done MQ acquire from %s failed (%s: %s): the "
+            "pre-recv gate will never open",
+            init_method, type(exc).__name__, exc,
+        )
         return None
     return MessageQueue.create_from_handle(pickle.loads(base64.b64decode(payload)), 0)
 
