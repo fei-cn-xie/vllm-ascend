@@ -63,7 +63,16 @@ def test_worker_publishes_after_creating_report_mq() -> None:
         "the worker must publish the done-MQ handle right after creating "
         "the report MQ (during init_device), before READY"
     )
-    assert "self.distributed_init_method" in src, (
-        "publishing must derive the wire store from the worker's own "
-        "distributed_init_method"
+    assert "get_lwd_init_method(self.vllm_config.lwd_config)" in src, (
+        "the wire URL must derive from the topology: the worker's "
+        "self.distributed_init_method is the executor's file store, which "
+        "parses to (None, None) and killed the 2026-10-19 bring-up"
+    )
+
+
+def test_wire_store_client_rejects_non_tcp_urls() -> None:
+    src = PRE_RECV.read_text(encoding="utf-8")
+    assert 'url.scheme != "tcp"' in src, (
+        "_wire_store_client must fail fast on non-tcp URLs instead of "
+        "passing (None, None) into the TCPStore constructor"
     )

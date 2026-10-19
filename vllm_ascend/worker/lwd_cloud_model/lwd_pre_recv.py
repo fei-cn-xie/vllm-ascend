@@ -182,10 +182,17 @@ LWD_IRECV_DONE_MQ_STORE_KEY = "lwd:irecv_done_mq"
 def _wire_store_client(init_method: str) -> "dist.TCPStore":
     from urllib.parse import urlsplit
 
-    import torch.distributed as dist
+    from vllm.distributed.utils import get_cached_tcp_store_client
 
     url = urlsplit(init_method)
-    return dist.TCPStore(url.hostname, url.port, is_master=False)
+    if url.scheme != "tcp" or url.hostname is None or url.port is None:
+        # Callers must pass the LWD wire URL (get_lwd_init_method); the
+        # executor's file-store init_method would silently parse to
+        # (None, None) here.
+        raise ValueError(
+            f"the wire store relay needs a tcp://host:port URL, got {init_method!r}"
+        )
+    return get_cached_tcp_store_client(url.hostname, url.port)
 
 
 def publish_done_mq_handle(mq: "MessageQueue", init_method: str) -> None:

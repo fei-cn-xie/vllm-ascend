@@ -338,6 +338,7 @@ class LwdCloudWorker(LwdWorkerBase):
         both lines but no SUBMIT = no hints arrived (hint MQ not attached;
         the log will say attached/none).
         """
+        from vllm.distributed.lwd import get_lwd_init_method
         from vllm_ascend.worker.lwd_cloud_model.lwd_pre_recv import (
             attach_hint_mq,
             create_report_mq,
@@ -348,8 +349,13 @@ class LwdCloudWorker(LwdWorkerBase):
         self._irecv_done_mq = create_report_mq()
         self.irecv_done_mq = self._irecv_done_mq
         # The handle travels to the engine through the wire TCP store, so
-        # the vllm executor stays free of LWD plumbing.
-        publish_done_mq_handle(self._irecv_done_mq, self.distributed_init_method)
+        # the vllm executor stays free of LWD plumbing. The URL must come
+        # from the topology (self.distributed_init_method is the
+        # executor's file store, not the wire store).
+        publish_done_mq_handle(
+            self._irecv_done_mq,
+            get_lwd_init_method(self.vllm_config.lwd_config),
+        )
         lwd_logger.info(
             "[Lwd][pre-recv] comm thread starting rank=%d hint MQ=%s",
             self.rank, "attached" if self._irecv_hint_mq is not None else "none",
