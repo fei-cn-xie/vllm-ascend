@@ -141,6 +141,18 @@ class NPUWorker(WorkerBase):
 
         adapt_patch()
 
+        # 2026-10-20 aivec 归属终审:原生服务装同一份采样探针(与 LWD 云
+        # 同仪器对比);VLLM_LWD_SAMPLER_PROBE=1 时启用,初始化期一次,
+        # 根因定位后随探针整体删除。
+        import os
+
+        if os.getenv("VLLM_LWD_SAMPLER_PROBE", "0") == "1":
+            from vllm_ascend.worker.lwd_cloud_model.lwd_sampler_probe import (
+                install_lwd_sampler_probe,
+            )
+
+            install_lwd_sampler_probe()
+
         # Register ops when worker init.
         from vllm_ascend import ops
 
