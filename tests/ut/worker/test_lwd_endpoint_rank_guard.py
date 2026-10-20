@@ -59,3 +59,17 @@ def test_endpoint_log_names_both_rank_domains() -> None:
         "the worker banner must print both rank domains so a future "
         "mismatch is visible at a glance"
     )
+
+
+def test_lwd_runners_have_no_stale_pcp_attribute() -> None:
+    """2026-10-20:首个过闸批次死于 self.pcp_size(老底座属性名,现底座只有
+    dcp_size;prefill 侧并行度住 parallel_config.prefill_context_parallel_size)。"""
+    from pathlib import Path as P
+    root = P(__file__).resolve().parents[3] / "vllm_ascend" / "worker"
+    for pkg in ("lwd_cloud_model", "lwd_edge_model", "lwd_base_model"):
+        for path in (root / pkg).rglob("*.py"):
+            src = path.read_text(encoding="utf-8")
+            assert "self.pcp_size" not in src, (
+                f"{path} still references the retired self.pcp_size; use "
+                "parallel_config.prefill_context_parallel_size"
+            )

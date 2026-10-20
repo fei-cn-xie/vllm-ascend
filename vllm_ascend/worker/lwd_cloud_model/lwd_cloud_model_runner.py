@@ -268,7 +268,9 @@ class LwdCloudModelRunner(LwdBaseModelRunner):
     ]:
         """Refresh the decode mask after the async speculative-position fix, then prepare model inputs."""
         if (self.use_async_spec_decode and self.enable_prompt_embeds
-                and intermediate_tensors is None and self.pcp_size == 1):
+                and intermediate_tensors is None
+                and (self.vllm_config.parallel_config.prefill_context_parallel_size
+                     == 1)):
             self._lwd_refresh_decode_embedding_mask(scheduler_output)
             if (get_pp_group().is_first_rank
                     and not self.model_config.is_encoder_decoder
