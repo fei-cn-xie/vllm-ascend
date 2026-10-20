@@ -95,3 +95,16 @@ def test_bincount_kernel_stays_upstream() -> None:
         "upstream bincount.py was edited again; localize with logs first"
     )
     assert "token_in_range = pos_mask & (token < vocab_size)" in src
+
+
+def test_sampler_probe_installs_in_worker_process() -> None:
+    """2026-10-20:探针必须装在 worker 进程(内核在这里发射);引擎进程
+    的模块补丁对 spawn 出的 worker 无效。"""
+    from pathlib import Path as P
+    src = P(__file__).resolve().parents[3].joinpath(
+        "vllm_ascend/worker/lwd_cloud_model/lwd_cloud_worker.py"
+    ).read_text(encoding="utf-8")
+    assert "def _lwd_install_sampler_probe" in src, "worker probe function missing"
+    assert "self._lwd_install_sampler_probe()" in src, "probe not called in init_device"
+    assert "bincount launch" in src, "kernel launch log format missing"
+    assert "OUT-OF-RANGE" in src, "out-of-range escalation missing"

@@ -14,6 +14,7 @@ Selected via ``parallel_config.worker_cls`` (see platform.py:
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 
@@ -49,6 +50,75 @@ class LwdCloudWorker(LwdWorkerBase):
     Selected by ``platform.py`` only when LWD is enabled on a cloud
     process; the data-plane wiring below runs unconditionally."""
 
+
+    # 2026-10-20 aivec 事故观测探针(在 WORKER 进程——此前装在引擎进程,
+    # 内核在 worker 跑,探针什么都看不到):记录分箱内核每次发射的
+    # shape/stride/ptr/vocab/min/max(预算内),越界值升 WARNING 并转储样本。
+    # 根因定位后整体删除。
+    _LWD_SAMPLER_PROBE_BUDGET = int(os.getenv("VLLM_LWD_SAMPLER_PROBE_BUDGET", "200"))
+
+    @classmethod
+    def _lwd_install_sampler_probe(cls) -> None:
+        """Idempotent per worker process; patches the penalty kernel entry."""
+        import vllm_ascend.ops.triton.penalty as penalty_mod
+        from vllm_ascend.sample import sampler as sampler_mod
+
+        if getattr(penalty_mod, "_lwd_probe_installed", False):
+            return
+        penalty_mod._lwd_probe_installed = True
+
+        budget = {"left": cls._LWD_SAMPLER_PROBE_BUDGET}
+        orig_entry = penalty_mod.get_token_bin_counts_and_mask_triton
+
+        def probed_entry(tokens, vocab_size, num_seqs=None):
+            in_range_note = ""
+            if budget["left"] > 0:
+                budget["left"] -= 1
+                t_min = int(tokens.min().item())
+                t_max = int(tokens.max().item())
+                in_range_note = f" min={t_min} max={t_max}"
+                if t_min < 0 or t_max >= vocab_size:
+                    lwd_logger.warning(
+                        "[LWD][sampler-probe] bincount OUT-OF-RANGE "
+                        "shape=%s stride=%s ptr=0x%x vocab=%d min=%d "
+                        "max=%d sample=%s",
+                        tuple(tokens.shape), tokens.stride(),
+                        tokens.data_ptr(), vocab_size, t_min, t_max,
+                        tokens.flatten()[:64].tolist(),
+                    )
+            lwd_logger.info(
+                "[LWD][sampler-probe] bincount launch shape=%s stride=%s "
+                "ptr=0x%x vocab=%d num_seqs=%s%s",
+                tuple(tokens.shape), tokens.stride(),
+                tokens.data_ptr(), vocab_size, num_seqs, in_range_note,
+            )
+            return orig_entry(tokens, vocab_size, num_seqs)
+
+        penalty_mod.get_token_bin_counts_and_mask_triton = probed_entry
+
+        orig_apply = sampler_mod.AscendSampler.apply_penalties
+
+        def probed_apply(logits, sampling_metadata, output_token_ids):
+            if not sampling_metadata.no_penalties and budget["left"] > 0:
+                prompt_ids = sampling_metadata.prompt_token_ids
+                lwd_logger.info(
+                    "[LWD][sampler-probe] penalties ACTIVE logits=%s "
+                    "rep=%s pres=%s freq=%s prompt_ids=%s",
+                    tuple(logits.shape),
+                    sampling_metadata.repetition_penalties.tolist()[:8],
+                    sampling_metadata.presence_penalties.tolist()[:8],
+                    sampling_metadata.frequency_penalties.tolist()[:8],
+                    ("None" if prompt_ids is None
+                     else tuple(prompt_ids.shape)),
+                )
+            return orig_apply(logits, sampling_metadata, output_token_ids)
+
+        sampler_mod.AscendSampler.apply_penalties = staticmethod(probed_apply)
+        lwd_logger.info(
+            "[LWD][sampler-probe] installed on worker (budget=%d)",
+            cls._LWD_SAMPLER_PROBE_BUDGET,
+        )
+
     def init_device(self) -> None:
         super().init_device()
         # channel-global DOWN seqno counter (worker layer, send-time alloc)
@@ -80,6 +150,7 @@ class LwdCloudWorker(LwdWorkerBase):
             self.vllm_config, self.device, worker=self
         )
         self._init_lwd_data_plane()
+        self._lwd_install_sampler_probe()
         # Only the endpoint rank (the cloud leader — first rank of the
         # first cloud DP in the topology) has a cross-node channel: start
         # its early-recv comm thread. The topology ranks are GLOBAL, while
