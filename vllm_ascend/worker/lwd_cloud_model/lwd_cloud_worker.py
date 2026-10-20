@@ -92,15 +92,28 @@ class LwdCloudWorker(LwdWorkerBase):
             # 2026-10-20 MTE 复现实验:penalty 张量在 device 上,.tolist()
             # 同样是 D2H 同步点,一并去掉——penalty 原始值由边侧 wire
             # penalties 探针(CPU 侧)记录,云侧只留宿主侧元数据。
+            # 排查续②:惩罚的真实输入是 output_token_ids(async 下已经
+            # update_async_output_token_ids 修复占位),不是 token_ids_cpu
+            # 账本(账本含 -1 是 async 设计常态)。此处清点修复后输入里
+            # 的 -1 行——这才是"毒是否到达内核"的真判据;纯 Python 列表
+            # 扫描,零设备同步。
             if not sampling_metadata.no_penalties and budget["left"] > 0:
                 budget["left"] -= 1
                 prompt_ids = sampling_metadata.prompt_token_ids
+                poison_rows = sum(1 for row in output_token_ids if -1 in row)
+                if poison_rows:
+                    lwd_logger.warning(
+                        "[LWD][sampler-probe] PENALTY INPUT POISON "
+                        "rows=%d/%d",
+                        poison_rows, len(output_token_ids),
+                    )
                 lwd_logger.info(
                     "[LWD][sampler-probe] penalties ACTIVE logits=%s "
-                    "prompt_ids=%s",
+                    "prompt_ids=%s poison_rows=%d",
                     tuple(logits.shape),
                     ("None" if prompt_ids is None
                      else tuple(prompt_ids.shape)),
+                    poison_rows,
                 )
             return orig_apply(logits, sampling_metadata, output_token_ids)
 
