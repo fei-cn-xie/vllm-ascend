@@ -73,3 +73,13 @@ def test_lwd_runners_have_no_stale_pcp_attribute() -> None:
                 f"{path} still references the retired self.pcp_size; use "
                 "parallel_config.prefill_context_parallel_size"
             )
+
+
+def test_lwd_mtp_proposer_matches_base_draft_contract() -> None:
+    """2026-10-20:首个过闸批次死于覆写签名缺 sampling_metadata(底座为
+    概率草稿采样扩了契约,迁移覆写停留在旧签名)。覆写必须接受并透传。"""
+    from pathlib import Path as P
+    proposer = P(__file__).resolve().parents[3] / "vllm_ascend" / "worker" / "lwd_cloud_model" / "lwd_mtp_proposer.py"
+    src = proposer.read_text(encoding="utf-8")
+    assert "sampling_metadata:" in src, "override lost the base-contract parameter"
+    assert "            sampling_metadata,\n        )" in src, "override must forward it to super()"

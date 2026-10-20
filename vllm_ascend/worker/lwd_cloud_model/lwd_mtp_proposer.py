@@ -1,11 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import torch
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
+
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SamplingMetadata
 
 
 class LwdMTPProposer(AscendEagleProposer):
@@ -21,6 +28,9 @@ class LwdMTPProposer(AscendEagleProposer):
         multi_steps_attn_metadata: "list[Any]",
         num_tokens: int,
         is_prefill: "bool | None" = None,
+        # Base contract since the probabilistic-draft change; the LWD path
+        # does not consume it but must accept and forward it.
+        sampling_metadata: "SamplingMetadata | None" = None,
     ) -> torch.Tensor:
         """Shard external embeddings in the active draft context before forward."""
         context = get_forward_context()
@@ -47,4 +57,5 @@ class LwdMTPProposer(AscendEagleProposer):
             multi_steps_attn_metadata,
             num_tokens,
             is_prefill,
+            sampling_metadata,
         )
