@@ -85,16 +85,18 @@ def test_lwd_mtp_proposer_matches_base_draft_contract() -> None:
     assert "            sampling_metadata,\n        )" in src, "override must forward it to super()"
 
 
-def test_bincount_kernel_stays_upstream() -> None:
-    """2026-10-20 教训:无指令级证据不得改上游内核。此文件必须保持与
-    ghdc/main 字节一致(此前加的 >=0 守卫已 revert)。"""
+def test_bincount_kernel_filters_negative_tokens() -> None:
+    """2026-10-20 aivec 终审翻案(证据齐备,替代 14abf6abb 的上游钉子):
+    惩罚输入 spec 段实测携带 -1 哨兵(移植版基线 4136 行 / LWD 4364 行,
+    全 spec 段,analyzer --compare 终审两侧同毒);上游 GPU 版靠
+    vocab_size+1 吸收列容纳 -1,移植版无吸收列,内核必须自带下界,
+    否则每次带惩罚推理静默污染邻座计数(中地址彩票时 aivec fault)。"""
     from pathlib import Path as P
     src = P(__file__).resolve().parents[3].joinpath(
         "vllm_ascend/ops/triton/bincount.py").read_text(encoding="utf-8")
-    assert "(token >= 0) & (token < vocab_size)" not in src, (
-        "upstream bincount.py was edited again; localize with logs first"
+    assert "token_in_range = pos_mask & (token >= 0) & (token < vocab_size)" in src, (
+        "bincount 下界守卫被移除;-1 哨兵将穿透为负偏移原子写"
     )
-    assert "token_in_range = pos_mask & (token < vocab_size)" in src
 
 
 def test_sampler_probe_installs_in_worker_process() -> None:
