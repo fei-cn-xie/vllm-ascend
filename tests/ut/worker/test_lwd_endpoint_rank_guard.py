@@ -83,3 +83,11 @@ def test_lwd_mtp_proposer_matches_base_draft_contract() -> None:
     src = proposer.read_text(encoding="utf-8")
     assert "sampling_metadata:" in src, "override lost the base-contract parameter"
     assert "            sampling_metadata,\n        )" in src, "override must forward it to super()"
+
+
+def test_bincount_kernel_bounds_both_ways() -> None:
+    """2026-10-20 aivec 事故加固:负垃圾值穿透裸上界导致 OOB 原子写。"""
+    from pathlib import Path as P
+    src = P(__file__).resolve().parents[3].joinpath(
+        "vllm_ascend/ops/triton/bincount.py").read_text(encoding="utf-8")
+    assert "(token >= 0) & (token < vocab_size)" in src

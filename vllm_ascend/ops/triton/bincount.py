@@ -74,7 +74,9 @@ def token_bin_counts_and_mask_kernel(
             other=vocab_size,
         )
 
-        token_in_range = pos_mask & (token < vocab_size)
+        # Negative garbage (uninitialized buffers) passes a bare upper
+        # bound; bound both ways or the atomic_add writes out of GM.
+        token_in_range = pos_mask & (token >= 0) & (token < vocab_size)
 
         safe_local_token = tl.where(token_in_range, token, 0)
         count_ptr = batch_counts_start + safe_local_token * counts_vocab_stride
