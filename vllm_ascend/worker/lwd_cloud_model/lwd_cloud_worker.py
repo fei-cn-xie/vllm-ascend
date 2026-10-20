@@ -71,26 +71,16 @@ class LwdCloudWorker(LwdWorkerBase):
         orig_entry = penalty_mod.get_token_bin_counts_and_mask_triton
 
         def probed_entry(tokens, vocab_size, num_seqs=None):
-            in_range_note = ""
-            if budget["left"] > 0 and tokens.numel() > 0:
-                budget["left"] -= 1
-                t_min = int(tokens.min().item())
-                t_max = int(tokens.max().item())
-                in_range_note = f" min={t_min} max={t_max}"
-                if t_min < 0 or t_max >= vocab_size:
-                    lwd_logger.warning(
-                        "[LWD][sampler-probe] bincount OUT-OF-RANGE "
-                        "shape=%s stride=%s ptr=0x%x vocab=%d min=%d "
-                        "max=%d sample=%s",
-                        tuple(tokens.shape), tokens.stride(),
-                        tokens.data_ptr(), vocab_size, t_min, t_max,
-                        tokens.flatten()[:64].tolist(),
-                    )
+            # 2026-10-20 MTE 复现实验:去掉 launch 前的 min()/.max()/.item()
+            # 设备读取——那是 D2H 同步点,会排空设备队列、关掉 async 占位
+            # 覆写的竞态窗口,疑似掩盖 bincount 负偏移 fault(现在复现不出
+            # 来)。只留宿主侧元数据行(零设备读),值检查待实验定论后按需
+            # 恢复。
             lwd_logger.info(
                 "[LWD][sampler-probe] bincount launch shape=%s stride=%s "
-                "ptr=0x%x vocab=%d num_seqs=%s%s",
+                "ptr=0x%x vocab=%d num_seqs=%s",
                 tuple(tokens.shape), tokens.stride(),
-                tokens.data_ptr(), vocab_size, num_seqs, in_range_note,
+                tokens.data_ptr(), vocab_size, num_seqs,
             )
             return orig_entry(tokens, vocab_size, num_seqs)
 
@@ -99,15 +89,16 @@ class LwdCloudWorker(LwdWorkerBase):
         orig_apply = sampler_mod.AscendSampler.apply_penalties
 
         def probed_apply(logits, sampling_metadata, output_token_ids):
+            # 2026-10-20 MTE 复现实验:penalty 张量在 device 上,.tolist()
+            # 同样是 D2H 同步点,一并去掉——penalty 原始值由边侧 wire
+            # penalties 探针(CPU 侧)记录,云侧只留宿主侧元数据。
             if not sampling_metadata.no_penalties and budget["left"] > 0:
+                budget["left"] -= 1
                 prompt_ids = sampling_metadata.prompt_token_ids
                 lwd_logger.info(
                     "[LWD][sampler-probe] penalties ACTIVE logits=%s "
-                    "rep=%s pres=%s freq=%s prompt_ids=%s",
+                    "prompt_ids=%s",
                     tuple(logits.shape),
-                    sampling_metadata.repetition_penalties.tolist()[:8],
-                    sampling_metadata.presence_penalties.tolist()[:8],
-                    sampling_metadata.frequency_penalties.tolist()[:8],
                     ("None" if prompt_ids is None
                      else tuple(prompt_ids.shape)),
                 )
