@@ -1,0 +1,61 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Guard: the pre-recv endpoint gate must compare GLOBAL ranks.
+
+2026-10-20 hang: the gate compared self.rank (the executor's per-node
+numbering) against the topology's cloud leader rank (global). With one
+edge card, global = local + 1, so cloud local rank 1 won the gate, its
+comm thread attached the MQs, consumed the hint and died on "rank 2
+holds no lwd_up channel"; the true endpoint (global rank 1) never ran
+the thread, the watermark stayed -1 and the gate held every prefill
+forever. Pure AST/source scan, no torch required.
+"""
+
+import re
+from pathlib import Path
+
+WORKER = (
+    Path(__file__).resolve().parents[3]
+    / "vllm_ascend"
+    / "worker"
+    / "lwd_cloud_model"
+    / "lwd_cloud_worker.py"
+)
+
+
+def test_endpoint_gate_uses_distributed_global_rank() -> None:
+    src = WORKER.read_text(encoding="utf-8")
+    # 端点判定必须以 dist.get_rank() 为左值,禁止裸 self.rank 与拓扑全局 rank 相比
+    assert re.search(
+        r"global_rank\s*=\s*dist\.get_rank\(\)", src
+    ), "endpoint gate must read the distributed global rank"
+    assert re.search(
+        r"global_rank\s*\n?\s*==\s*self\.vllm_config\.lwd_config\.topology"
+        r"\.clouds\[0\]\.dp\[0\]\.ranks\[0\]",
+        src,
+    ), "the endpoint comparison must use global_rank, not self.rank"
+    assert not re.search(
+        r"self\.rank\s*\n?\s*==\s*self\.vllm_config\.lwd_config\.topology",
+        src,
+    ), "a bare self.rank (executor-local numbering) leaked back into the gate"
+
+
+def test_endpoint_log_names_both_rank_domains() -> None:
+    src = WORKER.read_text(encoding="utf-8")
+    assert "local_rank=%d global_rank=%d endpoint=%s" in src, (
+        "the worker banner must print both rank domains so a future "
+        "mismatch is visible at a glance"
+    )

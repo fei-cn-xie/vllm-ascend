@@ -82,19 +82,25 @@ class LwdCloudWorker(LwdWorkerBase):
         self._init_lwd_data_plane()
         # Only the endpoint rank (the cloud leader — first rank of the
         # first cloud DP in the topology) has a cross-node channel: start
-        # its early-recv comm thread. The hint MQ was created by the
-        # executor before worker construction and exported via env; this
-        # side creates the done MQ writer, its handle rides the READY
-        # handshake back to the engine. Other ranks register non-endpoint.
+        # its early-recv comm thread. The topology ranks are GLOBAL, while
+        # self.rank is the executor's per-node numbering — the edge card
+        # count offsets them (seen live: local rank 1 of the cloud was
+        # picked as "endpoint", its comm thread then died on "rank 2 holds
+        # no lwd_up channel"). Compare the distributed global rank.
+        import torch.distributed as dist
+
+        global_rank = dist.get_rank()
         self._lwd_early_recv_endpoint = (
-            self.rank
+            global_rank
             == self.vllm_config.lwd_config.topology.clouds[0].dp[0].ranks[0]
         )
         self._lwd_up_hidden_size = self.model_config.get_hidden_size()
         # One log line per cloud rank: which ranks own the comm thread is obvious at a glance.
         lwd_logger.info(
-            "[Lwd][pre-recv] worker rank=%d endpoint=%s hidden=%d",
-            self.rank, self._lwd_early_recv_endpoint, self._lwd_up_hidden_size,
+            "[Lwd][pre-recv] worker local_rank=%d global_rank=%d endpoint=%s "
+            "hidden=%d",
+            self.rank, global_rank, self._lwd_early_recv_endpoint,
+            self._lwd_up_hidden_size,
         )
         if self._lwd_early_recv_endpoint:
             self._start_lwd_early_recv_thread()
