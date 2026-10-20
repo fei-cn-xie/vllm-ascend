@@ -30,6 +30,9 @@ def install_lwd_sampler_probe() -> None:
 
     budget = {"left": int(os.getenv("VLLM_LWD_SAMPLER_PROBE_BUDGET", "200"))}
     orig_entry = penalty_mod.get_token_bin_counts_and_mask_triton
+    # 首次 launch 一次性打显存池快照(此时 HCCL/wire 通信域已建好),
+    # 用于对比两侧(LWD 9-rank 共享世界 vs 原生独立世界)的分配器布局。
+    first_launch = {"done": False}
 
     def probed_entry(tokens, vocab_size, num_seqs=None):
         # 值检查(.min/.max/.item)是 D2H 同步点,会扰动 async 占位覆写
@@ -40,7 +43,30 @@ def install_lwd_sampler_probe() -> None:
             tuple(tokens.shape), tokens.stride(),
             tokens.data_ptr(), vocab_size, num_seqs,
         )
-        return orig_entry(tokens, vocab_size, num_seqs)
+        if not first_launch["done"]:
+            first_launch["done"] = True
+            try:
+                import torch
+
+                lwd_logger.info(
+                    "[LWD][sampler-probe] bincount first-launch mem "
+                    "reserved=%d allocated=%d",
+                    torch.npu.memory_reserved(),
+                    torch.npu.memory_allocated(),
+                )
+            except Exception:  # pragma: no cover - npu 内存 API 差异
+                pass
+        result = orig_entry(tokens, vocab_size, num_seqs)
+        # 2026-10-20 崩溃不对称排查:负偏移写是否 fault 取决于 bin_counts
+        # 是否落在分配器段边界。记录返回的 counts 实际地址与 2MB 段对齐
+        # 标志(段起点对齐),对比两侧分配布局;data_ptr 是宿主元数据,
+        # 零设备同步。守卫修复后该测量仍有效(量的是分配,不是 fault)。
+        counts_ptr = int(result[0].data_ptr())
+        lwd_logger.info(
+            "[LWD][sampler-probe] bincount return counts_ptr=0x%x align2m=%d",
+            counts_ptr, 1 if counts_ptr % (2 << 20) == 0 else 0,
+        )
+        return result
 
     penalty_mod.get_token_bin_counts_and_mask_triton = probed_entry
 
