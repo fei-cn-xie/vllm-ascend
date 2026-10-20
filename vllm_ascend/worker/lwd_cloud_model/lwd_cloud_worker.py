@@ -101,19 +101,28 @@ class LwdCloudWorker(LwdWorkerBase):
                 budget["left"] -= 1
                 prompt_ids = sampling_metadata.prompt_token_ids
                 poison_rows = sum(1 for row in output_token_ids if -1 in row)
+                # 排查终局:惩罚输入 = [*output(修复链管), *spec]拼接,
+                # REPAIR 聚合证实 out 段干净 -> 毒在 spec 段。此处单独
+                # 清点 spec_token_ids 行内 -1,与拼接行计数对差即定源
+                # (草稿填充 vs 陈旧行)。纯 Python,零设备同步。
+                spec_ids_meta = sampling_metadata.spec_token_ids
+                spec_poison_rows = (
+                    sum(1 for row in spec_ids_meta if -1 in row)
+                    if spec_ids_meta else 0
+                )
                 if poison_rows:
                     lwd_logger.warning(
                         "[LWD][sampler-probe] PENALTY INPUT POISON "
-                        "rows=%d/%d",
-                        poison_rows, len(output_token_ids),
+                        "rows=%d/%d spec_rows=%d",
+                        poison_rows, len(output_token_ids), spec_poison_rows,
                     )
                 lwd_logger.info(
                     "[LWD][sampler-probe] penalties ACTIVE logits=%s "
-                    "prompt_ids=%s poison_rows=%d",
+                    "prompt_ids=%s poison_rows=%d spec_poison=%d",
                     tuple(logits.shape),
                     ("None" if prompt_ids is None
                      else tuple(prompt_ids.shape)),
-                    poison_rows,
+                    poison_rows, spec_poison_rows,
                 )
             return orig_apply(logits, sampling_metadata, output_token_ids)
 
