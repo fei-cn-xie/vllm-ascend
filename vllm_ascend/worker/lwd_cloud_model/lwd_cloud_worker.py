@@ -72,7 +72,7 @@ class LwdCloudWorker(LwdWorkerBase):
 
         def probed_entry(tokens, vocab_size, num_seqs=None):
             in_range_note = ""
-            if budget["left"] > 0:
+            if budget["left"] > 0 and tokens.numel() > 0:
                 budget["left"] -= 1
                 t_min = int(tokens.min().item())
                 t_max = int(tokens.max().item())
