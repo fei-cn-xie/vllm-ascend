@@ -60,10 +60,18 @@ def install_lwd_sampler_probe() -> None:
                 if spec_ids_meta else 0
             )
             if poison_rows:
+                # 2026-10-20 崩溃不对称排查:负偏移写仅当毒行=批内第 0 行
+                # 且 bin_counts 落段边界才 fault(行号>=1 恒静默写前一行
+                # 尾部)。min_idx=0 即"第 0 行带毒"这一崩溃前置的直接读数,
+                # 用于对比 LWD(可复现崩溃)与原生基线(不崩)的行序差异。
+                poison_idx = [
+                    i for i, r in enumerate(output_token_ids) if -1 in r
+                ]
                 lwd_logger.warning(
                     "[LWD][sampler-probe] PENALTY INPUT POISON "
-                    "rows=%d/%d spec_rows=%d",
+                    "rows=%d/%d spec_rows=%d min_idx=%d idx_sample=%s",
                     poison_rows, len(output_token_ids), spec_poison_rows,
+                    min(poison_idx), poison_idx[:8],
                 )
             lwd_logger.info(
                 "[LWD][sampler-probe] penalties ACTIVE logits=%s "
