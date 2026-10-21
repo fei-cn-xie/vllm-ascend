@@ -52,13 +52,6 @@ class LwdCloudWorker(LwdWorkerBase):
 
     def init_device(self) -> None:
         super().init_device()
-        # 2026-10-20 aivec 观测探针(与原生服务共用同一份,见
-        # lwd_sampler_probe;根因定位后整体删除)
-        from vllm_ascend.worker.lwd_cloud_model.lwd_sampler_probe import (
-            install_lwd_sampler_probe,
-        )
-
-        install_lwd_sampler_probe()
         # channel-global DOWN seqno counter (worker layer, send-time alloc)
         self._lwd_down_next_seqno = 0
         # req_id -> posted UP recv futures (consumed by the runner's device-side inject)
