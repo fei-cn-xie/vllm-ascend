@@ -45,7 +45,14 @@ def test_row_reset_wired_into_admission() -> None:
     # 动作与接线函数存在,且 __init__ 完成接线
     assert "def _lwd_reset_reused_row(" in src, "行槽清理动作函数缺失"
     assert "def _lwd_reset_reused_rows_on_admission(" in src, "入住挂接函数缺失"
-    assert "self._lwd_reset_reused_rows_on_admission()" in src, "__init__ 未接线"
+    assert "self._lwd_reset_reused_rows_on_admission()" in src, "未接线"
+    # 2026-10-21 验收事故:initialize_kv_cache 会重建 InputBatch(混合 KV
+    # 几何必触发),旧实例上的钩子随之失效——必须在重建后重新挂接
+    assert src.count("def initialize_kv_cache(") == 1, "覆写必须恰好一份"
+    init_kv = src.index("def initialize_kv_cache(")
+    assert src.index("self._lwd_reset_reused_rows_on_admission()", init_kv) > init_kv, (
+        "initialize_kv_cache 末尾必须重新挂接(首验失败根因)"
+    )
 
 
 def test_row_reset_semantics() -> None:

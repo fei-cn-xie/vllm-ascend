@@ -34,7 +34,10 @@ from vllm_ascend.worker.lwd_hash.lwd_hash_routing import (
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 if TYPE_CHECKING:
+    from contextlib import AbstractContextManager
+
     from vllm.v1.core.sched.output import LwdEmbedBatch
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
     from vllm.v1.worker.gpu_input_batch import CachedRequestState
     from vllm_ascend.distributed.lwd_data_plane.lwd_transfer_future import LwdTransferFuture
@@ -155,6 +158,14 @@ class LwdCloudModelRunner(LwdBaseModelRunner):
         this process's InputBatch instance instead: native bookkeeping
         first, then _lwd_reset_reused_row. Migrate to an upstream hook
         if one is ever provided.
+
+        Idempotent per InputBatch instance: initialize_kv_cache
+        REBUILDS the InputBatch when the final KV geometry differs from
+        the pre-load guess (always true for the hybrid groups here,
+        model_runner_v1 re-init), so the hook must be re-anchored on
+        the live instance - see initialize_kv_cache below. The first
+        acceptance run failed exactly this way: the wrapper stayed on
+        the discarded instance and the residue poison survived.
         """
         batch = self.input_batch
         if getattr(batch, "_lwd_row_reset_hooked", False):
@@ -168,6 +179,21 @@ class LwdCloudModelRunner(LwdBaseModelRunner):
             return req_index
 
         batch.add_request = add_request_then_reset_row
+
+    def initialize_kv_cache(
+        self,
+        kv_cache_config: "KVCacheConfig",
+        kv_cache_allocation_context: "AbstractContextManager | None" = None,
+    ) -> None:
+        """Re-anchor the row-reset hook after the InputBatch rebuild.
+
+        The base may replace self.input_batch here (hybrid KV geometry);
+        the per-instance hook flag on the fresh instance is absent, so
+        the installer below (re)hooks the live one."""
+        super().initialize_kv_cache(
+            kv_cache_config, kv_cache_allocation_context
+        )
+        self._lwd_reset_reused_rows_on_admission()
 
     def _get_drafter(self) -> "SpecDecodeBaseProposer | None":
         """Use the LWD MTP embedding adapter only in LWD mode."""
