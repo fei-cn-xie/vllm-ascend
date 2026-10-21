@@ -1023,18 +1023,21 @@ class LwdCloudModelRunner(LwdBaseModelRunner):
         batch_req_ids: "list[str]",
         discard_mask_np: "np.ndarray",
         sampler_output: "SamplerOutput",
-    ) -> "tuple[torch.Tensor, torch.Tensor, None, list[str], None] | None":
+    ) -> "tuple[torch.Tensor, torch.Tensor, list[int] | None, torch.npu.Event, list[str]] | None":
         """Production DOWN collection (rank-replay): hidden packaging + global
         ranks + num_accepted.
 
         Orchestration: row selection / rank computation branches on spec
-        vs non-spec (_lwd_pack_plain_down_rows / _lwd_pack_spec_down_rows);
-        meta packaging and the readiness event live in
-        _lwd_stage_down_meta. Zero added synchronization on the compute
-        critical path; batch order/mask come from the capture-time
+        vs non-spec (_lwd_pack_plain_down_rows / _lwd_pack_spec_down_rows).
+        The step meta stays on device (no pinned D2H here — the side-stream
+        copy was not fenceable on this platform); a per-step ready event is
+        recorded on the main stream, and the fenced harvest (dedicated
+        stream + wait_event + same-stream done event) runs in the worker's
+        sample_tokens, off this collect. Zero added synchronization on the
+        compute critical path; batch order/mask come from the capture-time
         snapshot (guards against batch-queue overlap reordering).
         Returns:
-          (hidden_packet, pinned_view, None, req_ids, None)
+          (hidden_packet, meta_dev, seg_lens_host, ready_event, req_ids)
         or None (no in-flight requests this step).
         """
         _t0 = time.monotonic()
@@ -1069,24 +1072,27 @@ class LwdCloudModelRunner(LwdBaseModelRunner):
                                     device=logits.device)
             meta_dev = torch.cat(ranks_list + [counts_dev, counts_dev])
         selection_done = time.monotonic()
-        pinned_view, _n_meta = self._lwd_stage_down_meta(
-            meta_dev, seg_lens_host,
-        )
-        # [Lwd][perf] Collection segments: rank = rank computation + row
-        # gathering; pinned = meta packaging + copy
+        # Per-step ready event: recorded on the main stream before the
+        # payload leaves the collect. The fenced harvest (dedicated stream
+        # + wait_event + same-stream done event) lives in the worker's
+        # sample_tokens, NOT here — keeping the compute critical path free
+        # of any synchronization. The device tensor travels with the
+        # payload; the pinned D2H + shared-event scheme is retired (it
+        # could not fence the side-stream copy on this platform).
+        ready_event = torch.npu.Event()
+        ready_event.record()
         lwd_logger.info(
-            "[Lwd][perf] collect rows=%d rank=%.2f pinned=%.2f total=%.2fms",
+            "[Lwd][perf] collect rows=%d rank=%.2f total=%.2fms",
             hidden_packet.shape[0],
             (selection_done - _t0) * 1000,
-            (time.monotonic() - selection_done) * 1000,
             (time.monotonic() - _t0) * 1000,
         )
         return (
             hidden_packet,
-            pinned_view,
-            None,
+            meta_dev,
+            seg_lens_host,
+            ready_event,
             [r for i, r in enumerate(batch_req_ids) if valid[i]],
-            None,
         )
 
     def _lwd_pack_plain_down_rows(
@@ -1212,36 +1218,6 @@ class LwdCloudModelRunner(LwdBaseModelRunner):
             hidden_packet=hidden_packet, ranks=ranks,
             counts_dev=counts_dev, seg_lens_host=vlen_np.tolist(),
         )
-
-    def _lwd_stage_down_meta(
-        self,
-        meta_dev: torch.Tensor,
-        seg_lens_host: list[int] | None,
-    ) -> tuple[torch.Tensor, int]:
-        """Meta packaging and readiness event: the pinned copy is queued at
-        the main-stream tail (async), immediately followed by the readiness
-        event (via worker.note_lwd_meta_ready); the worker's response-enqueue
-        path synchronizes before sending — making "response sent ⟹ pinned
-        ready" a hard guarantee (the sync runs on the output thread, off the
-        compute critical path). Returns (pinned view, length)."""
-        n_dev = meta_dev.numel()
-        n_meta = n_dev + (len(seg_lens_host) if seg_lens_host is not None else 0)
-        pinned = self._lwd_meta_pinned(n_meta)
-        pinned[:n_dev].copy_(meta_dev, non_blocking=True)
-        if seg_lens_host is not None:
-            pinned.numpy()[n_dev:n_meta] = seg_lens_host
-        self.worker.note_lwd_meta_ready()
-        return pinned[:n_meta], n_meta
-
-    def _lwd_meta_pinned(self, n: int) -> "torch.Tensor":
-        """Rotate the pinned buffers (depth 4 > batch_queue depth 2 + one step
-        of engine lag): prevents a later edge-stream copy from overwriting
-        the previous step's meta before the engine has read it.
-        Correspondence: LwdPinnedStaging.next_pinned ≍ the original
-        hand-rolled 4-slot list rotation (capacity floor 4096 unchanged)."""
-        return self._lwd_staging(
-            "down_meta", dtype=torch.int32, min_capacity=4096, device_mirror=False,
-        ).next_pinned(n)
 
     def _lwd_h2d_stage_i64(self, arr: "np.ndarray") -> torch.Tensor:
         """Async H2D staging for int64 host index arrays (pinned 4-slot

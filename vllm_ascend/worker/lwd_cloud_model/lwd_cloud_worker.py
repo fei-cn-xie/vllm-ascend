@@ -625,12 +625,14 @@ class LwdCloudWorker(LwdWorkerBase):
         output = self.model_runner.sample_tokens(grammar_output)
         _t_sample = time.monotonic()
         # rank-replay DOWN: send the hidden packet (channel-async,
-        # in-stream ordered); the pinned view rides the output's inner
-        # layer (readiness guaranteed by get_output's wait_stream on the
-        # main stream), and the engine side decodes/publishes the meta.
+        # in-stream ordered); the step meta stays on device until the
+        # fenced harvest below brings it to the host with a device-side
+        # stream dependency (dedicated stream wait_event on the ready
+        # event, completion event recorded on the copy stream itself).
         payload = self.model_runner.take_lwd_pending_down_payload()
         if payload is not None and output is not None:
-            hidden, pinned, _event, req_ids, _accepted = payload
+            (hidden, meta_dev, seg_lens_host, ready_event,
+             req_ids) = payload
             seqno = self._lwd_next_down_seqno()
             lwd_logger.info(
                 "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
@@ -645,25 +647,62 @@ class LwdCloudWorker(LwdWorkerBase):
                     seqno=seqno,
                 )
             )
-            # Under the async wrapper it must ride the inner layer, or get_output() unwraps it away
+            # Fenced harvest: device-side dependency guarantees the copy
+            # starts only after the main-stream work that produced
+            # meta_dev; done.synchronize() waits for this copy only
+            # (microseconds), not the whole GPU. This replaces the retired
+            # pinned D2H + shared-event scheme, which could not fence the
+            # side-stream copy on this platform (the engine could read a
+            # previous generation's meta image — wrong accepted counts).
+            _t_harvest = time.monotonic()
+            stream = self._lwd_get_harvest_stream()
+            n_dev = meta_dev.numel()
+            n_seg = len(seg_lens_host) if seg_lens_host is not None else 0
+            buf = self._lwd_get_harvest_pinned(max(n_dev + n_seg, 4096))
+            with torch.npu.stream(stream):
+                stream.wait_event(ready_event)
+                buf[:n_dev].copy_(meta_dev, non_blocking=True)
+                done = torch.npu.Event()
+                done.record()
+            done.synchronize()
+            if n_seg:
+                buf.numpy()[n_dev : n_dev + n_seg] = seg_lens_host
+            # Attach the finished 4-tuple (wire layout [meta|seg_lens]
+            # unchanged); the engine parse path needs no changes.
             target = getattr(output, "_model_runner_output", output)
             target.lwd_down_carrier = (
-                pinned, req_ids, hidden.numel(), seqno
+                buf[: n_dev + n_seg], req_ids, hidden.numel(), seqno,
             )
             # [Lwd][perf] Per-step cloud timing: sample = sampling +
             # collection (rank computation included); send = the DOWN
-            # submit (snapshot clone + isend + bridge wait); total = the
-            # whole step
+            # submit (snapshot clone + isend + bridge wait); harvest =
+            # the fenced meta copy; total = the whole step
             lwd_logger.info(
                 "[Lwd][perf] cloud-step seqno=%d sample=%.2f send=%.2f "
-                "total=%.2fms rows=%d",
+                "harvest=%.2f total=%.2fms rows=%d",
                 seqno,
                 (_t_sample - _t0) * 1000,
                 (time.monotonic() - _t_sample) * 1000,
+                (time.monotonic() - _t_harvest) * 1000,
                 (time.monotonic() - _t0) * 1000,
                 hidden.shape[0] if hidden is not None else 0,
             )
         return output
+
+    def _lwd_get_harvest_stream(self) -> "torch.npu.Stream":
+        """Lazily create the dedicated harvest stream (one per worker)."""
+        if not hasattr(self, "_lwd_harvest_stream"):
+            self._lwd_harvest_stream = torch.npu.Stream()
+        return self._lwd_harvest_stream
+
+    def _lwd_get_harvest_pinned(self, min_capacity: int) -> "torch.Tensor":
+        """Lazily allocate (or grow) the pinned harvest buffer."""
+        buf = getattr(self, "_lwd_harvest_pinned", None)
+        if buf is None or buf.numel() < min_capacity:
+            buf = self._lwd_harvest_pinned = torch.empty(
+                min_capacity, dtype=torch.int32, pin_memory=True,
+            )
+        return buf
 
     # ------------------------------------------------------------------ #
     # LWD housekeeping (control-plane glue)                               #
@@ -681,19 +720,6 @@ class LwdCloudWorker(LwdWorkerBase):
             "[Lwd][cloud-worker] flush finished reqs=%s", list(finished_req_ids)
         )
         self.model_runner.lwd_release_finished(finished_req_ids)
-
-    def note_lwd_meta_ready(self) -> None:
-        """Record the DOWN meta readiness event on the worker.
-
-        The runner's collect path calls this right after queuing the
-        async pinned copy; the executor's response-enqueue path reads
-        ``worker._lwd_meta_ready_event`` and synchronizes on it before
-        the engine decodes the pinned meta (see vllm
-        multiproc_executor), which is why the event stays a worker
-        attribute rather than moving to the runner.
-        """
-        self._lwd_meta_ready_event = torch.npu.Event()
-        self._lwd_meta_ready_event.record()
 
     def _register_lwd_prompt_embeds_provider(self) -> None:
         """Wire the draft proposer's first-pass prompt-embeds provider.

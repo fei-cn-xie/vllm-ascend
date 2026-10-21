@@ -1,10 +1,9 @@
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Rotating pinned staging buffers shared by the LWD edge/cloud host transfers.
 
-Consolidates the three hand-rolled rotation loops that used to live in
-``LwdEdgeWorker._lwd_embed_ids_h2d``, ``LwdCloudModelRunner
-._lwd_h2d_stage_i64`` (pinned + device mirror pairs) and
-``LwdCloudModelRunner._lwd_meta_pinned`` (pinned only). Rotation depth 4
+Consolidates the hand-rolled rotation loops that used to live in
+``LwdEdgeWorker._lwd_embed_ids_h2d`` and ``LwdCloudModelRunner
+._lwd_h2d_stage_i64`` (pinned + device mirror pairs). Rotation depth 4
 covers batch_queue depth 2 plus one step of engine lag, so a later step
 cannot overwrite a buffer whose transfer is still queued.
 """
