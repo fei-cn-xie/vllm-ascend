@@ -38,7 +38,8 @@ WORKER = (
 
 def test_endpoint_gate_uses_distributed_global_rank() -> None:
     src = WORKER.read_text(encoding="utf-8")
-    # 端点判定必须以 dist.get_rank() 为左值,禁止裸 self.rank 与拓扑全局 rank 相比
+    # The endpoint check must take dist.get_rank() as the left-hand value; a bare
+    # self.rank must never be compared against the topology's global rank
     assert re.search(
         r"global_rank\s*=\s*dist\.get_rank\(\)", src
     ), "endpoint gate must read the distributed global rank"
@@ -62,8 +63,9 @@ def test_endpoint_log_names_both_rank_domains() -> None:
 
 
 def test_lwd_runners_have_no_stale_pcp_attribute() -> None:
-    """2026-10-20:首个过闸批次死于 self.pcp_size(老底座属性名,现底座只有
-    dcp_size;prefill 侧并行度住 parallel_config.prefill_context_parallel_size)。"""
+    """2026-10-20: the first gated batch died on self.pcp_size (an old-base
+    attribute name; the current base only has dcp_size; the prefill-side
+    parallel degree lives in parallel_config.prefill_context_parallel_size)."""
     from pathlib import Path as P
     root = P(__file__).resolve().parents[3] / "vllm_ascend" / "worker"
     for pkg in ("lwd_cloud_model", "lwd_edge_model", "lwd_base_model"):
@@ -76,8 +78,10 @@ def test_lwd_runners_have_no_stale_pcp_attribute() -> None:
 
 
 def test_lwd_mtp_proposer_matches_base_draft_contract() -> None:
-    """2026-10-20:首个过闸批次死于覆写签名缺 sampling_metadata(底座为
-    概率草稿采样扩了契约,迁移覆写停留在旧签名)。覆写必须接受并透传。"""
+    """2026-10-20: the first gated batch died on an override signature missing
+    sampling_metadata (the base extended the contract for probabilistic draft
+    sampling; the migrated override stayed on the old signature). The override
+    must accept and forward it."""
     from pathlib import Path as P
     proposer = P(__file__).resolve().parents[3] / "vllm_ascend" / "worker" / "lwd_cloud_model" / "lwd_mtp_proposer.py"
     src = proposer.read_text(encoding="utf-8")
@@ -86,10 +90,13 @@ def test_lwd_mtp_proposer_matches_base_draft_contract() -> None:
 
 
 def test_bincount_kernel_stays_upstream() -> None:
-    """2026-10-21 决定:内核保持与 ghdc/main 一致(>=0 守卫 c0ccd8215
-    已 revert)。该守卫实测能止住 curl→bench 可复现崩溃,但负值进入
-    内核的通路已由 runner 侧行槽清理(1e0d4a98b/0c413f54d)根断,
-    守卫回退保持上游原样。集中式同毒的静默污染走上游 issue 处置。"""
+    """2026-10-21 decision: the kernel stays identical to ghdc/main (the
+    >=0 guard c0ccd8215 was reverted). That guard was measured to stop the
+    reproducible curl->bench crash, but the path feeding negative values
+    into the kernel has been cut at the root by the runner-side row-slot
+    cleanup (1e0d4a98b/0c413f54d), so the guard rollback keeps upstream
+    as-is. Silent contamination of the same poison in the centralized
+    kernel is handled via an upstream issue."""
     from pathlib import Path as P
     src = P(__file__).resolve().parents[3].joinpath(
         "vllm_ascend/ops/triton/bincount.py").read_text(encoding="utf-8")

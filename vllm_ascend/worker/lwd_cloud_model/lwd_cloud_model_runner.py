@@ -91,7 +91,7 @@ class LwdCloudModelRunner(LwdBaseModelRunner):
     ) -> None:
         super().__init__(vllm_config, device, worker)
         self._lwd_pending_down_payload = None
-        # 行槽残渣清理:请求入住即冲(2026-10-21 MTE 根因闭环)
+        # Row-slot residue cleanup: flush reused rows as soon as a request is admitted (2026-10-21 MTE root-cause closure)
         self._lwd_reset_reused_rows_on_admission()
         # Stage per-request prompt lengths for device-side mask refresh.
         if self.use_async_spec_decode and self.enable_prompt_embeds:

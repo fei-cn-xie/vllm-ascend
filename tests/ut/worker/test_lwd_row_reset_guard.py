@@ -42,30 +42,31 @@ RUNNER = (
 
 def test_row_reset_wired_into_admission() -> None:
     src = RUNNER.read_text(encoding="utf-8")
-    # 动作与接线函数存在,且 __init__ 完成接线
-    assert "def _lwd_reset_reused_row(" in src, "行槽清理动作函数缺失"
-    assert "def _lwd_reset_reused_rows_on_admission(" in src, "入住挂接函数缺失"
-    assert "self._lwd_reset_reused_rows_on_admission()" in src, "未接线"
-    # 2026-10-21 验收事故:initialize_kv_cache 会重建 InputBatch(混合 KV
-    # 几何必触发),旧实例上的钩子随之失效——必须在重建后重新挂接
-    assert src.count("def initialize_kv_cache(") == 1, "覆写必须恰好一份"
+    # The action and wiring functions exist, and __init__ completes the wiring
+    assert "def _lwd_reset_reused_row(" in src, "row-slot cleanup action function is missing"
+    assert "def _lwd_reset_reused_rows_on_admission(" in src, "admission hook function is missing"
+    assert "self._lwd_reset_reused_rows_on_admission()" in src, "not wired"
+    # 2026-10-21 acceptance incident: initialize_kv_cache rebuilds the
+    # InputBatch (always triggered by hybrid KV geometry), and the hook on
+    # the old instance dies with it — it must be re-hooked after the rebuild
+    assert src.count("def initialize_kv_cache(") == 1, "the override must exist exactly once"
     init_kv = src.index("def initialize_kv_cache(")
     assert src.index("self._lwd_reset_reused_rows_on_admission()", init_kv) > init_kv, (
-        "initialize_kv_cache 末尾必须重新挂接(首验失败根因)"
+        "initialize_kv_cache must re-hook at the end (root cause of the first acceptance failure)"
     )
 
 
 def test_row_reset_semantics() -> None:
-    """只冲 ids=None 的行,填 vocab_size(padding 语义),原生入账先行。"""
+    """Flush only rows with ids=None, fill with vocab_size (padding semantics), native bookkeeping first."""
     src = RUNNER.read_text(encoding="utf-8")
-    assert "if request.prompt_token_ids is not None:" in src, "带真 ids 的行必须早退"
+    assert "if request.prompt_token_ids is not None:" in src, "rows carrying real ids must bail out early"
     assert "batch.token_ids_cpu[req_index, :num_prompt] = batch.vocab_size" in src, (
-        "必须以 vocab_size 填充(无 token 语义),不得用其他值"
+        "must fill with vocab_size (no-token semantics); no other value allowed"
     )
-    # 包装次序:原生入账在前,清理在后(任何读者见到行之前残渣已冲)
+    # Wrapping order: native bookkeeping first, cleanup after (residue is flushed before any reader sees the row)
     wire = src.index("req_index = orig_add(request)")
     reset = src.index("self._lwd_reset_reused_row(request, req_index)")
-    assert wire < reset, "清理必须发生在原生入账之后"
-    # 实例级挂接(不碰共享类),幂等守卫在位
+    assert wire < reset, "cleanup must happen after native bookkeeping"
+    # Instance-level hooking (does not touch the shared class); idempotency guard in place
     assert "batch.add_request = add_request_then_reset_row" in src
     assert 'getattr(batch, "_lwd_row_reset_hooked", False)' in src
