@@ -22,8 +22,9 @@ hint queued there would never get its recv posted "early".
 
 * hint MQ: the engine creates the writer (handle exported to env before
   worker creation); the cloud endpoint rank attaches the reader by handle;
-* done MQ: the cloud endpoint rank creates the writer, the handle rides
-  the READY handshake back, and the engine attaches the reader.
+* done MQ: the cloud endpoint rank creates the writer; after the executor
+  is up, the engine fetches its handle over ``collective_rpc``
+  (``LwdCloudWorker.lwd_early_recv_done_handle``) and attaches the reader.
 
 Watermark semantics: ``is_irecv_complete(channel, seqno)`` ==
 ``seqno <= watermark``. Per-channel completion order = seqno order
@@ -58,22 +59,10 @@ import threading
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
-from vllm.lwd_logger import lwd_logger
-
 from vllm_ascend.distributed.lwd_data_plane.lwd_types import LwdChannelType
 
 if TYPE_CHECKING:
-    import torch.distributed as dist
     from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
-
-# The logger name must sit inside the **vllm.** namespace: vLLM attaches
-# handlers only to loggers named "vllm" (DEFAULT_LOGGING_CONFIG,
-# propagate=False); child loggers reach that handler by propagation.
-# vllm_ascend.* loggers cannot reach "vllm" (the root logger has no
-# handler). This module's own logging keeps only exception diagnostics
-# (the healthy-path HINT/watermark/gate/worker segments are all logged in
-# lwd_cloud_engine.py / lwd_cloud_mixed_scheduler.py /
-# lwd_cloud_worker.py).
 
 #: Env var carrying the downstream hint MQ handle. The executor exports it
 #: before creating the worker; the worker rebuilds the reader in
@@ -166,58 +155,9 @@ def attach_hint_mq() -> MessageQueue | None:
 
 
 def create_report_mq() -> MessageQueue:
-    """Worker side: create the done MQ (writer)."""
+    """Worker side: create the done MQ (writer); the engine fetches its
+    handle over ``collective_rpc`` once the executor is up."""
     return _new_sideband_mq()
-
-
-# The done-MQ handle travels worker -> engine through the shared world's
-# TCP store (the rendezvous at master_addr:master_port the HCCL world
-# joins), so the vllm executor stays free of LWD plumbing: the worker
-# publishes after creating the MQ, the engine acquires once the workers
-# are ready.
-LWD_IRECV_DONE_MQ_STORE_KEY = "lwd:irecv_done_mq"
-
-
-def _wire_store_client(init_method: str) -> dist.TCPStore:
-    from urllib.parse import urlsplit
-
-    from vllm.distributed.utils import get_cached_tcp_store_client
-
-    url = urlsplit(init_method)
-    if url.scheme != "tcp" or url.hostname is None or url.port is None:
-        # Callers must pass the shared world URL (get_distributed_init_method
-        # on master_addr/master_port); the executor's file-store init_method
-        # would silently parse to (None, None) here.
-        raise ValueError(f"the wire store relay needs a tcp://host:port URL, got {init_method!r}")
-    return get_cached_tcp_store_client(url.hostname, url.port)
-
-
-def publish_done_mq_handle(mq: MessageQueue, init_method: str) -> None:
-    """Worker side: publish the done-MQ handle to the wire store."""
-    payload = base64.b64encode(pickle.dumps(mq.export_handle())).decode("ascii")
-    _wire_store_client(init_method).set(LWD_IRECV_DONE_MQ_STORE_KEY, payload)
-
-
-def acquire_done_mq(init_method: str) -> MessageQueue | None:
-    """Engine side: rebuild the done-MQ reader from the wire store.
-
-    Call after the workers are ready (they publish during init_device).
-    Returns None when the key is absent (non-LWD or not yet published);
-    the failure reason is logged so a stuck gate is diagnosable.
-    """
-    from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
-
-    try:
-        payload = _wire_store_client(init_method).get(LWD_IRECV_DONE_MQ_STORE_KEY)
-    except Exception as exc:
-        lwd_logger.warning(
-            "[pre-recv] done MQ acquire from %s failed (%s: %s): the pre-recv gate will never open",
-            init_method,
-            type(exc).__name__,
-            exc,
-        )
-        return None
-    return MessageQueue.create_from_handle(pickle.loads(base64.b64decode(payload)), 0)
 
 
 # ---------------------------------------------------------------------- #
@@ -249,15 +189,11 @@ def post_irecv_hint(hint: dict) -> None:
     and they must be visible in the logs.
     """
     if _hint_sender is None:
-        # No transport = this process does not participate in early recv
-        # (e.g. the phase-scheduler escape hatch): losing a hint costs no
-        # correctness — that branch has no gate waiting on it, and the
-        # consume point posts the recv itself.
-        lwd_logger.warning(
-            "[Lwd][pre-recv] HINT DROPPED: no sender registered seqno=%s",
-            hint.get("seqno"),
-        )
-        return
+        # The engine registers the sender during startup, before it accepts
+        # any edge message, so a missing one is a wiring error; dropping the
+        # hint would stall the pre-recv gate forever (nobody would pre-post
+        # that recv, the watermark would never advance).
+        raise RuntimeError(f"[LWD] early-recv hint for seqno {hint.get('seqno')} has no registered sender")
     _hint_sender(hint)
 
 

@@ -37,6 +37,7 @@ from vllm_ascend.worker.lwd_hash.lwd_hash_routing import hash_layer_count, hash_
 if TYPE_CHECKING:
     from typing import Any
 
+    from vllm.distributed.device_communicators.shm_broadcast import Handle
     from vllm.v1.core.sched.output import (
         GrammarOutput,
         LwdEmbedBatch,
@@ -292,13 +293,11 @@ class LwdCloudWorker(LwdWorkerBase):
         self._early_recv_pending: dict[tuple[LwdChannelType, int], dict[str, Any]] = {}
         # Rate-limit timestamp for the stuck-queue diagnostic
         self._early_recv_stuck_log_at = 0.0
-        # Downstream hint MQ (reader) / upstream completion MQ (writer)
+        # Downstream hint MQ (reader) / upstream completion MQ (writer); the
+        # engine attaches the done reader through the handle returned by
+        # lwd_early_recv_done_handle (fetched over collective_rpc).
         self._irecv_hint_mq = None
         self._irecv_done_mq = None
-        # Public alias: WorkerProc takes it after worker construction,
-        # returns the handle with READY, and the engine attaches its done
-        # reader (see vllm/v1/executor/multiproc_executor.py).
-        self.irecv_done_mq = None
         self._lwd_early_recv_thread: threading.Thread | None = None
 
     def _lwd_build_up_recv_request(self, seqno: int, num_tokens: int, aux_rows: int) -> LwdTransferRequest:
@@ -339,27 +338,16 @@ class LwdCloudWorker(LwdWorkerBase):
         both lines but no SUBMIT = no hints arrived (hint MQ not attached;
         the log will say attached/none).
         """
-        from vllm.utils.network_utils import get_distributed_init_method
-
         from vllm_ascend.worker.lwd_cloud_model.lwd_pre_recv import (
             attach_hint_mq,
             create_report_mq,
-            publish_done_mq_handle,
         )
 
         self._irecv_hint_mq = attach_hint_mq()
         self._irecv_done_mq = create_report_mq()
-        self.irecv_done_mq = self._irecv_done_mq
-        # The handle travels to the engine through the shared world's TCP
-        # store, so the vllm executor stays free of LWD plumbing. The URL
-        # is the world rendezvous (master_addr:master_port); the worker's
-        # self.distributed_init_method is the executor's file store and
-        # cannot be used here.
-        parallel_config = self.vllm_config.parallel_config
-        publish_done_mq_handle(
-            self._irecv_done_mq,
-            get_distributed_init_method(parallel_config.master_addr, parallel_config.master_port),
-        )
+        # The engine fetches this MQ's handle through
+        # lwd_early_recv_done_handle over collective_rpc once the executor
+        # is up, so the vllm executor stays free of LWD plumbing.
         lwd_logger.info(
             "[Lwd][pre-recv] comm thread starting rank=%d hint MQ=%s",
             self.rank,
@@ -371,6 +359,14 @@ class LwdCloudWorker(LwdWorkerBase):
             daemon=True,
         )
         self._lwd_early_recv_thread.start()
+
+    def lwd_early_recv_done_handle(self) -> Handle | None:
+        """Handle of the early-recv done MQ, for the engine to attach its
+        reader; None on ranks that do not report completions (the
+        non-endpoint ranks hold no cross-node channel)."""
+        if self._irecv_done_mq is None:
+            return None
+        return self._irecv_done_mq.export_handle()
 
     def _lwd_early_recv_loop(self) -> None:
         """Comm thread body: take hints -> pre-post recvs; poll futures ->
