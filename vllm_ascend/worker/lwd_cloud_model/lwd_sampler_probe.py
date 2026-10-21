@@ -33,8 +33,25 @@ def install_lwd_sampler_probe() -> None:
     # 首次 launch 一次性打显存池快照(此时 HCCL/wire 通信域已建好),
     # 用于对比两侧(LWD 9-rank 共享世界 vs 原生独立世界)的分配器布局。
     first_launch = {"done": False}
+    # 2026-10-21 崩溃取证模式(VLLM_LWD_CRASH_HUNT=1):同步读出每次内核
+    # 输入的最小值/负值个数,按 prompt/output 配对标注(apply_penalties
+    # 每轮先 prompt 后 output 各调一次)。带 D2H 同步,仅在崩溃可复现的
+    # 取证期开,平时保持关闭零开销。
+    crash_hunt = os.getenv("VLLM_LWD_CRASH_HUNT", "0") == "1"
+    hunt_seq = {"n": 0}
 
     def probed_entry(tokens, vocab_size, num_seqs=None):
+        if crash_hunt:
+            hunt_seq["n"] += 1
+            t_min = int(tokens.min().item())
+            t_neg = int((tokens < 0).sum().item())
+            lwd_logger.warning(
+                "[LWD][sampler-probe] CRASH HUNT seq=%d half=%s min=%d "
+                "neg=%d shape=%s",
+                hunt_seq["n"],
+                "prompt" if hunt_seq["n"] % 2 == 1 else "output",
+                t_min, t_neg, tuple(tokens.shape),
+            )
         # 值检查(.min/.max/.item)是 D2H 同步点,会扰动 async 占位覆写
         # 时序,已去除;只留宿主侧元数据行(零设备读)。
         lwd_logger.info(
