@@ -43,8 +43,14 @@ def install_lwd_sampler_probe() -> None:
     def probed_entry(tokens, vocab_size, num_seqs=None):
         if crash_hunt:
             hunt_seq["n"] += 1
-            t_min = int(tokens.min().item())
-            t_neg = int((tokens < 0).sum().item())
+            # 空张量(全空行批,内核侧本就跳过)无负值,防 .min() 抛
+            # (2026-10-21 事故:探针在过渡期空批上崩掉 worker,同类于
+            # abb11cd66,此处补上守卫)
+            if tokens.numel() > 0:
+                t_min = int(tokens.min().item())
+                t_neg = int((tokens < 0).sum().item())
+            else:
+                t_min, t_neg = 0, 0
             lwd_logger.warning(
                 "[LWD][sampler-probe] CRASH HUNT seq=%d half=%s min=%d "
                 "neg=%d shape=%s",
