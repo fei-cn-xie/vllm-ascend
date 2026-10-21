@@ -27,8 +27,6 @@ forever. Pure AST/source scan, no torch required.
 import re
 from pathlib import Path
 
-import pytest
-
 WORKER = (
     Path(__file__).resolve().parents[3]
     / "vllm_ascend"
@@ -87,54 +85,19 @@ def test_lwd_mtp_proposer_matches_base_draft_contract() -> None:
     assert "            sampling_metadata,\n        )" in src, "override must forward it to super()"
 
 
-def test_bincount_kernel_filters_negative_tokens() -> None:
-    """2026-10-20 aivec 终审翻案(证据齐备,替代 14abf6abb 的上游钉子):
-    惩罚输入 spec 段实测携带 -1 哨兵(移植版基线 4136 行 / LWD 4364 行,
-    全 spec 段,analyzer --compare 终审两侧同毒);上游 GPU 版靠
-    vocab_size+1 吸收列容纳 -1,移植版无吸收列,内核必须自带下界,
-    否则每次带惩罚推理静默污染邻座计数(中地址彩票时 aivec fault)。"""
+def test_bincount_kernel_stays_upstream() -> None:
+    """2026-10-21 决定:内核保持与 ghdc/main 一致(>=0 守卫 c0ccd8215
+    已 revert)。该守卫实测能止住 curl→bench 可复现崩溃,但负值进入
+    内核的通路尚未定位(列表层毒被 penalties.py:36 的 masked_fill 挡,
+    崩溃值走的路无探针覆盖;CRASH HUNT 取证进行中)。集中式同毒的
+    静默污染走上游 issue 处置。取证定源前不得再改此内核。"""
     from pathlib import Path as P
     src = P(__file__).resolve().parents[3].joinpath(
         "vllm_ascend/ops/triton/bincount.py").read_text(encoding="utf-8")
-    assert "token_in_range = pos_mask & (token >= 0) & (token < vocab_size)" in src, (
-        "bincount 下界守卫被移除;-1 哨兵将穿透为负偏移原子写"
+    assert "(token >= 0) & (token < vocab_size)" not in src, (
+        "upstream bincount.py was edited again; localize with logs first"
     )
-
-
-def test_bincount_kernel_ignores_negative_sentinels() -> None:
-    """2026-10-20 aivec 回归(执行级,复现 bug 本体):惩罚输入携带 -1
-    哨兵(async+MTP 数据契约,两侧实测 4136/4364 行)时,内核必须忽略
-    它们且计数正确——修复前 -1 穿透为负偏移原子写(row0+段边界时
-    aivec fault,否则静默污染邻座计数)。
-    需 NPU 环境;轻量环境跳过,真实环境补跑(本文件其余用例为纯
-    源码扫描,任何主机可跑)。"""
-    try:
-        import torch
-        import torch_npu  # noqa: F401
-    except ImportError:
-        pytest.skip("需 NPU 环境(torch + torch_npu)补跑")
-    from vllm_ascend.ops.triton.bincount import (
-        get_token_bin_counts_and_mask_triton,
-    )
-
-    vocab = 100
-    tokens = torch.tensor(
-        [
-            [5, -1, 7, 100, 5],  # -1 哨兵 + vocab padding
-            [-1, -1, 3, 99, 0],
-        ],
-        dtype=torch.int32,
-        device="npu",
-    )
-    counts, mask = get_token_bin_counts_and_mask_triton(tokens, vocab, 2)
-    counts_cpu = counts.cpu()
-    # 正常 token 计数正确
-    assert int(counts_cpu[0, 5]) == 2 and int(counts_cpu[0, 7]) == 1
-    assert int(counts_cpu[1, 3]) == 1 and int(counts_cpu[1, 99]) == 1
-    assert int(counts_cpu[1, 0]) == 1
-    # -1 与 vocab padding 均不计入任何桶(修复前 -1 写到桶外)
-    assert int(counts_cpu.sum()) == 5
-    assert not bool(mask[0, 0].cpu()) and bool(mask[0, 5].cpu())
+    assert "token_in_range = pos_mask & (token < vocab_size)" in src
 
 
 def test_sampler_probe_installs_in_worker_process() -> None:

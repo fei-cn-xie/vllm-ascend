@@ -74,14 +74,7 @@ def token_bin_counts_and_mask_kernel(
             other=vocab_size,
         )
 
-        # 2026-10-20 aivec 事故终审修复:惩罚输入的 spec 段携带 -1 哨兵
-        # (async+MTP 的上游数据契约:rejection_sampler 以 PLACEHOLDER=-1
-        # 初始化,草稿矩形带 -1 填充;--compare 终审实测移植版基线 4136 行
-        # /LWD 4364 行,全 spec 段)。上游 GPU 版靠 vocab_size+1 宽吸收列
-        # 容纳 -1;移植版无吸收列,负偏移原子写会静默污染邻座计数(中地址
-        # 彩票时 aivec fault)。补下界恢复上游等价行为(mm 分支同款守卫,
-        # 上游 8c867fa95 删特性时连带删去)。
-        token_in_range = pos_mask & (token >= 0) & (token < vocab_size)
+        token_in_range = pos_mask & (token < vocab_size)
 
         safe_local_token = tl.where(token_in_range, token, 0)
         count_ptr = batch_counts_start + safe_local_token * counts_vocab_stride
