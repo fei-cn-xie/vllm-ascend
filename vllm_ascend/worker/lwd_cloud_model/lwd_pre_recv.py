@@ -64,7 +64,6 @@ from vllm_ascend.distributed.lwd_data_plane.lwd_types import LwdChannelType
 
 if TYPE_CHECKING:
     import torch.distributed as dist
-
     from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 
 # The logger name must sit inside the **vllm.** namespace: vLLM attaches
@@ -126,18 +125,19 @@ def hint_fields(hint: dict) -> tuple[int, int, int] | None:
 # ---------------------------------------------------------------------- #
 # Bypass MQ lifecycle                                                    #
 # ---------------------------------------------------------------------- #
-def _new_sideband_mq() -> "MessageQueue":
+def _new_sideband_mq() -> MessageQueue:
     """A 1-reader 1-writer bypass MQ (hint and report share the spec; only the endpoint rank participates)."""
     from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 
     return MessageQueue(
-        1, 1,
+        1,
+        1,
         max_chunk_bytes=_SIDEBAND_MAX_CHUNK_BYTES,
         max_chunks=_SIDEBAND_MAX_CHUNKS,
     )
 
 
-def create_hint_mq() -> "MessageQueue":
+def create_hint_mq() -> MessageQueue:
     """Engine side: create the hint MQ (writer) and export the handle to
     the environment.
 
@@ -145,13 +145,11 @@ def create_hint_mq() -> "MessageQueue":
     from the env at startup); both fork and spawn inherit via env vars.
     """
     mq = _new_sideband_mq()
-    os.environ[LWD_RECV_HINT_MQ_ENV] = base64.b64encode(
-        pickle.dumps(mq.export_handle())
-    ).decode("ascii")
+    os.environ[LWD_RECV_HINT_MQ_ENV] = base64.b64encode(pickle.dumps(mq.export_handle())).decode("ascii")
     return mq
 
 
-def attach_hint_mq() -> "MessageQueue | None":
+def attach_hint_mq() -> MessageQueue | None:
     """Worker side: rebuild the hint MQ reader from the handle in the
     environment.
 
@@ -167,41 +165,40 @@ def attach_hint_mq() -> "MessageQueue | None":
     return MessageQueue.create_from_handle(pickle.loads(base64.b64decode(raw)), 0)
 
 
-def create_report_mq() -> "MessageQueue":
+def create_report_mq() -> MessageQueue:
     """Worker side: create the done MQ (writer)."""
     return _new_sideband_mq()
 
 
-# The done-MQ handle travels worker -> engine through the shared wire TCP
-# store (the same rendezvous the deployment already depends on), so the
-# vllm executor stays free of LWD plumbing: the worker publishes after
-# creating the MQ, the engine acquires once the workers are ready.
+# The done-MQ handle travels worker -> engine through the shared world's
+# TCP store (the rendezvous at master_addr:master_port the HCCL world
+# joins), so the vllm executor stays free of LWD plumbing: the worker
+# publishes after creating the MQ, the engine acquires once the workers
+# are ready.
 LWD_IRECV_DONE_MQ_STORE_KEY = "lwd:irecv_done_mq"
 
 
-def _wire_store_client(init_method: str) -> "dist.TCPStore":
+def _wire_store_client(init_method: str) -> dist.TCPStore:
     from urllib.parse import urlsplit
 
     from vllm.distributed.utils import get_cached_tcp_store_client
 
     url = urlsplit(init_method)
     if url.scheme != "tcp" or url.hostname is None or url.port is None:
-        # Callers must pass the LWD wire URL (get_lwd_init_method); the
-        # executor's file-store init_method would silently parse to
-        # (None, None) here.
-        raise ValueError(
-            f"the wire store relay needs a tcp://host:port URL, got {init_method!r}"
-        )
+        # Callers must pass the shared world URL (get_distributed_init_method
+        # on master_addr/master_port); the executor's file-store init_method
+        # would silently parse to (None, None) here.
+        raise ValueError(f"the wire store relay needs a tcp://host:port URL, got {init_method!r}")
     return get_cached_tcp_store_client(url.hostname, url.port)
 
 
-def publish_done_mq_handle(mq: "MessageQueue", init_method: str) -> None:
+def publish_done_mq_handle(mq: MessageQueue, init_method: str) -> None:
     """Worker side: publish the done-MQ handle to the wire store."""
     payload = base64.b64encode(pickle.dumps(mq.export_handle())).decode("ascii")
     _wire_store_client(init_method).set(LWD_IRECV_DONE_MQ_STORE_KEY, payload)
 
 
-def acquire_done_mq(init_method: str) -> "MessageQueue | None":
+def acquire_done_mq(init_method: str) -> MessageQueue | None:
     """Engine side: rebuild the done-MQ reader from the wire store.
 
     Call after the workers are ready (they publish during init_device).
@@ -214,9 +211,10 @@ def acquire_done_mq(init_method: str) -> "MessageQueue | None":
         payload = _wire_store_client(init_method).get(LWD_IRECV_DONE_MQ_STORE_KEY)
     except Exception as exc:
         lwd_logger.warning(
-            "[pre-recv] done MQ acquire from %s failed (%s: %s): the "
-            "pre-recv gate will never open",
-            init_method, type(exc).__name__, exc,
+            "[pre-recv] done MQ acquire from %s failed (%s: %s): the pre-recv gate will never open",
+            init_method,
+            type(exc).__name__,
+            exc,
         )
         return None
     return MessageQueue.create_from_handle(pickle.loads(base64.b64decode(payload)), 0)

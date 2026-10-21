@@ -47,17 +47,11 @@ class LwdPinnedStaging:
         if self._pinned_slots is not None and self._pinned_slots[0].numel() >= n:
             return
         capacity = max(n, self._min_capacity)
-        self._pinned_slots = [
-            torch.empty(capacity, dtype=self._dtype, pin_memory=True)
-            for _ in range(self._depth)
-        ]
+        self._pinned_slots = [torch.empty(capacity, dtype=self._dtype, pin_memory=True) for _ in range(self._depth)]
         self._device_slots = (
             None
             if self._device is None
-            else [
-                torch.empty(capacity, dtype=self._dtype, device=self._device)
-                for _ in range(self._depth)
-            ]
+            else [torch.empty(capacity, dtype=self._dtype, device=self._device) for _ in range(self._depth)]
         )
         self._index = 0
 
@@ -66,9 +60,7 @@ class LwdPinnedStaging:
         self._index = (index + 1) % self._depth
         return index
 
-    def stage_to_device(
-        self, src: Sequence[int] | np.ndarray, n: int
-    ) -> torch.Tensor:
+    def stage_to_device(self, src: Sequence[int] | np.ndarray, n: int) -> torch.Tensor:
         """Stage ``src`` and issue an async H2D; return the ``[:n]`` device view.
 
         Same-stream ordering guarantees the consumer kernel reads this
