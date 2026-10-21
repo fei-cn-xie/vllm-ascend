@@ -36,6 +36,7 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import LwdEmbedBatch
     from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+    from vllm.v1.worker.gpu_input_batch import CachedRequestState
     from vllm_ascend.distributed.lwd_data_plane.lwd_transfer_future import LwdTransferFuture
 
 
@@ -87,6 +88,8 @@ class LwdCloudModelRunner(LwdBaseModelRunner):
     ) -> None:
         super().__init__(vllm_config, device, worker)
         self._lwd_pending_down_payload = None
+        # 行槽残渣清理:请求入住即冲(2026-10-21 MTE 根因闭环)
+        self._lwd_reset_reused_rows_on_admission()
         # Stage per-request prompt lengths for device-side mask refresh.
         if self.use_async_spec_decode and self.enable_prompt_embeds:
             self._lwd_prompt_lens_gpu = torch.zeros(
@@ -117,6 +120,54 @@ class LwdCloudModelRunner(LwdBaseModelRunner):
             )
             self._lwd_hash_prompt_mask = torch.zeros(self.max_num_tokens, dtype=torch.bool, device=device)
             self._lwd_hash_token_ids = torch.zeros(self.max_num_tokens, dtype=torch.int64, device=device)
+
+    def _lwd_reset_reused_row(
+        self, request: "CachedRequestState", req_index: int,
+    ) -> None:
+        """Clear tokens left in a reused batch row by the previous request.
+
+        LWD cloud requests carry no token ids (the wire ships embeddings
+        only), so the native add_request skips writing the row's prompt
+        region for them. Stale cells from the row's previous occupant -
+        including -1 placeholders that async scheduling leaves behind and
+        nothing repairs for penalty-free requests - survive row reuse and
+        ride the prompt-token tensor into the penalty bincount kernel,
+        where negative ids become negative-offset writes (the aivec
+        fault). Native requests carry real ids and overwrite the region
+        on every admission, which is exactly the behavior missing here.
+
+        Fill [0, num_prompt) with vocab_size - the "no token" padding
+        value every downstream consumer already ignores - once, at
+        admission, before any reader can observe the row.
+        """
+        if request.prompt_token_ids is not None:
+            return  # rows with real ids are already overwritten natively
+        batch = self.input_batch
+        num_prompt = int(batch.num_prompt_tokens[req_index])
+        batch.token_ids_cpu[req_index, :num_prompt] = batch.vocab_size
+
+    def _lwd_reset_reused_rows_on_admission(self) -> None:
+        """Hook the row reset onto request admission (instance-level).
+
+        The admission call site lives inside the shared update_states
+        with no LWD-owned seam; overriding it would mean copying shared
+        logic that breaks on every upstream change. Wrap add_request on
+        this process's InputBatch instance instead: native bookkeeping
+        first, then _lwd_reset_reused_row. Migrate to an upstream hook
+        if one is ever provided.
+        """
+        batch = self.input_batch
+        if getattr(batch, "_lwd_row_reset_hooked", False):
+            return
+        batch._lwd_row_reset_hooked = True
+        orig_add = batch.add_request
+
+        def add_request_then_reset_row(request):
+            req_index = orig_add(request)
+            self._lwd_reset_reused_row(request, req_index)
+            return req_index
+
+        batch.add_request = add_request_then_reset_row
 
     def _get_drafter(self) -> "SpecDecodeBaseProposer | None":
         """Use the LWD MTP embedding adapter only in LWD mode."""
